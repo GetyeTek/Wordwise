@@ -1,40 +1,27 @@
 // sw.js
 
-// Use a more descriptive cache name and update the version when you make changes.
-const APP_SHELL_CACHE = 'wordwise-app-shell-v1';
-const DYNAMIC_CACHE = 'wordwise-dynamic-v1';
+const APP_SHELL_CACHE = 'wordwise-app-shell-v2'; // <-- Increment version to force update
+const DYNAMIC_CACHE = 'wordwise-dynamic-v2';   // <-- Increment version
 
-// All the essential files your app needs to load its basic UI.
-// This INCLUDES your local files and critical third-party libraries.
-const urlsToCache = [
+// Cache ONLY your LOCAL, ESSENTIAL files in the install step.
+// These are guaranteed to be available and won't fail.
+const appShellFiles = [
   '/',
   '/index.html',
   '/manifest.json',
   '/app.js',
   '/icon-192x192.png',
-  '/icon-512x512.png',
-  // Critical Third-Party Scripts
-  'https://cdn.jsdelivr.net/npm/marked/marked.min.js',
-  'https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js',
-  'https://unpkg.com/@phosphor-icons/web',
-  'https://esm.run/@google/generative-ai',
-  // Critical Google Fonts Stylesheet
-  'https://fonts.googleapis.com/css2?display=swap&family=Lexend:wght@400;500;600;700&family=Noto+Sans:wght@400;500;700'
+  '/icon-512x512.png'
 ];
 
-// 1. Install: Cache the App Shell
+// 1. Install: Cache the minimal App Shell
 self.addEventListener('install', event => {
-  console.log('Installing PWA service worker...');
+  console.log('[Service Worker] Install');
   event.waitUntil(
     caches.open(APP_SHELL_CACHE)
       .then(cache => {
-        console.log('Caching App Shell:', urlsToCache);
-        // Use addAll with an array of requests to handle potential opaque responses from CDNs
-        const requests = urlsToCache.map(url => new Request(url, { mode: 'no-cors' }));
-        return cache.addAll(requests);
-      })
-      .catch(error => {
-        console.error('Failed to cache App Shell during install:', error);
+        console.log('[Service Worker] Caching app shell');
+        return cache.addAll(appShellFiles);
       })
       .then(() => self.skipWaiting())
   );
@@ -42,13 +29,13 @@ self.addEventListener('install', event => {
 
 // 2. Activate: Clean up old caches
 self.addEventListener('activate', event => {
-  console.log('Activating service worker and clearing old caches...');
+  console.log('[Service Worker] Activate');
   event.waitUntil(
     caches.keys().then(cacheNames => {
       return Promise.all(
         cacheNames.map(cacheName => {
           if (cacheName !== APP_SHELL_CACHE && cacheName !== DYNAMIC_CACHE) {
-            console.log(`Deleting old cache: ${cacheName}`);
+            console.log(`[Service Worker] Deleting old cache: ${cacheName}`);
             return caches.delete(cacheName);
           }
         })
@@ -58,40 +45,47 @@ self.addEventListener('activate', event => {
   return self.clients.claim();
 });
 
-// 3. Fetch: Intercept all requests and serve from cache
+// 3. Fetch: Intercept requests and apply caching strategies
 self.addEventListener('fetch', event => {
-  const url = new URL(event.request.url);
+    // For navigation requests (like loading the page), use a Network Falling Back to Cache strategy.
+    // This ensures the user gets the latest HTML if online, but it still works offline.
+    if (event.request.mode === 'navigate') {
+        event.respondWith(
+            fetch(event.request)
+                .catch(() => caches.match('/index.html'))
+        );
+        return;
+    }
 
-  // Strategy 1: Cache First for App Shell resources
-  // This is fast and reliable for files that don't change often.
-  if (urlsToCache.includes(event.request.url) || urlsToCache.includes(url.pathname)) {
+    // For all other requests (CSS, JS, Fonts, etc.)
     event.respondWith(
-      caches.match(event.request).then(response => {
-        return response || fetch(event.request);
-      })
-    );
-    return; // Exit after handling
-  }
+        caches.match(event.request)
+            .then(cacheResponse => {
+                // If the response is in the cache, return it immediately.
+                if (cacheResponse) {
+                    return cacheResponse;
+                }
 
-  // Strategy 2: Stale-While-Revalidate for other requests (like font files)
-  // This is great for dynamic content. It serves from cache immediately,
-  // then updates the cache in the background for the next visit.
-  event.respondWith(
-    caches.open(DYNAMIC_CACHE).then(cache => {
-      return cache.match(event.request).then(response => {
-        const fetchPromise = fetch(event.request).then(networkResponse => {
-          // Check if we received a valid response before caching
-          if (networkResponse && networkResponse.status === 200) {
-            cache.put(event.request, networkResponse.clone());
-          }
-          return networkResponse;
-        }).catch(err => {
-            // Handle network failure. If there's no cached response, this will fail.
-            console.warn(`Fetch failed for: ${event.request.url}`, err);
-        });
-        // Return the cached response immediately if available, otherwise wait for the network
-        return response || fetchPromise;
-      });
-    })
-  );
+                // If not in cache, fetch from the network.
+                return fetch(event.request).then(networkResponse => {
+                    // Open the dynamic cache to store the new response.
+                    return caches.open(DYNAMIC_CACHE).then(cache => {
+                        // We must clone the response because it's a "stream"
+                        // that can only be consumed once. We need one for the
+                        // cache and one for the browser.
+                        // We also check for valid responses to avoid caching errors.
+                        if (networkResponse && networkResponse.status === 200) {
+                           cache.put(event.request, networkResponse.clone());
+                        }
+                        // Return the network response to the browser.
+                        return networkResponse;
+                    });
+                });
+            }).catch(error => {
+                // This will catch errors if the fetch fails (e.g., user is offline
+                // and the item is not in the cache). You could return a fallback
+                // image or data here if you wanted.
+                console.error('[Service Worker] Fetch failed; returning offline fallback if available.', error);
+            })
+    );
 });
